@@ -1,0 +1,7 @@
+# Additional dependencies for the Shadow Portfolio inference API
+# Install alongside the base requirements.txt:
+#   pip install -r requirements.txt -r requirements-api.txt
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
