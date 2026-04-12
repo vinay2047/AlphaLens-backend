@@ -82,21 +82,26 @@ def get_headlines(ticker: str, count: int = 5, days_back: int = 30) -> list[dict
                 continue
             seen_headlines.add(headline.lower())
 
+            h_low = headline.lower()
+            s_low = summary.lower()
+            t_low = ticker.lower()
+            c_low = company_kw.lower() if company_kw else None
+
             score = 0
             
             # High Priority: Ticker or Name in the actual Headline
-            if ticker_pattern.search(headline):
+            if t_low in h_low:
                 score += 5
-            if company_pattern and company_pattern.search(headline):
+            if c_low and c_low in h_low:
                 score += 4
                 
             # Medium Priority: Ticker or Name in Summary
-            if ticker_pattern.search(summary):
+            if t_low in s_low:
                 score += 2
-            if company_pattern and company_pattern.search(summary):
+            if c_low and c_low in s_low:
                 score += 1
 
-            # Only keep articles that score above a zero threshold
+            # Keep the article if it mentions the stock or symbol anywhere
             if score > 0:
                 pub_time = item.get("datetime")
                 dt = datetime.fromtimestamp(pub_time, tz=timezone.utc) if pub_time else datetime.now(tz=timezone.utc)
