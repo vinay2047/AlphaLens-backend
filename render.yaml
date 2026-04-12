@@ -2,7 +2,7 @@ services:
   - type: web
     name: alphalens-backend
     env: python
-    buildCommand: "pip install uv && uv pip install --index-strategy unsafe-best-match --python /opt/render/project/src/.venv/bin/python -r requirements.txt"
+    buildCommand: "pip install uv && uv pip install --index-strategy unsafe-best-match --python /opt/render/project/src/.venv/bin/python -r requirements.txt && python verify_models.py"
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: PYTHON_VERSION
