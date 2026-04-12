@@ -253,25 +253,34 @@ async def _background_warmup():
     Load all services in background after uvicorn binds the port.
 
     Services are loaded ONE AT A TIME (sequentially) to avoid compounding
-    memory spikes. The double-checked locks inside each _ensure_* function
-    prevent race conditions if a user request arrives during warmup.
+    memory spikes. gc.collect() runs between loads to reclaim temporary
+    allocations before the next heavy import.
+
+    Order: shadow FIRST (imports torch — needs the most RAM while memory
+    is cleanest), then sentiment (lightweight API call), then prediction.
     """
+    import gc
+
     await asyncio.sleep(2)  # let uvicorn fully bind and answer health checks
     logger.info("Background warmup: starting sequential service loading...")
 
     loop = asyncio.get_event_loop()
 
-    # Order: prediction (lightest) → sentiment (API call, fast) → shadow (torch)
+    # Shadow first — torch import needs ~200MB, do it while RAM is cleanest
     for name, loader in [
-        ("prediction", _ensure_prediction),
-        ("sentiment", _ensure_sentiment),
         ("shadow", _ensure_shadow),
+        ("sentiment", _ensure_sentiment),
+        ("prediction", _ensure_prediction),
     ]:
         try:
             ok = await loop.run_in_executor(None, loader)
             logger.info("Background warmup: %s → %s", name, "loaded" if ok else "FAILED")
         except Exception as e:
             logger.error("Background warmup: %s failed: %s", name, e)
+
+        # Free temporary memory before loading the next service
+        gc.collect()
+        await asyncio.sleep(1)
 
     logger.info("Background warmup complete.")
 
