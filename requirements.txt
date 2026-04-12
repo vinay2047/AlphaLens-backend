@@ -17,10 +17,7 @@ yfinance
 scikit-learn
 joblib
 
-# --- Sentiment service (HuggingFace) ---
-transformers
-torch
-hf_xet
+# --- Sentiment service (HuggingFace Inference API) ---
 finnhub-python
 
 # --- Price prediction service (statistical — no TensorFlow) ---
@@ -31,6 +28,7 @@ websockets
 # --- Shadow portfolio service (RL) ---
 gymnasium
 stable-baselines3
+torch
 matplotlib
 
 # --- Caching (optional on Render) ---

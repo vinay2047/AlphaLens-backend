@@ -13,10 +13,10 @@ Swagger UI:  http://localhost:8000/docs
 
 Import strategy
 ---------------
-Heavy ML libraries (torch, transformers, stable_baselines3) are loaded LAZILY
-on first API request — NOT at module import time. This ensures uvicorn can bind
-the port within Render's timeout window (~5 minutes), since torch alone can take
-60+ seconds to import on small instances.
+Service modules are loaded LAZILY — NOT at module import time. This ensures
+uvicorn can bind the port within Render's timeout window. After binding, a
+background warmup task loads all services sequentially (one at a time to
+avoid memory spikes).
 """
 
 from __future__ import annotations
@@ -245,13 +245,51 @@ def _cache_get(symbol: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Lifespan
+# Background warmup — loads services sequentially AFTER port binds
+# ---------------------------------------------------------------------------
+
+async def _background_warmup():
+    """
+    Load all services in background after uvicorn binds the port.
+
+    Services are loaded ONE AT A TIME (sequentially) to avoid compounding
+    memory spikes. The double-checked locks inside each _ensure_* function
+    prevent race conditions if a user request arrives during warmup.
+    """
+    await asyncio.sleep(2)  # let uvicorn fully bind and answer health checks
+    logger.info("Background warmup: starting sequential service loading...")
+
+    loop = asyncio.get_event_loop()
+
+    # Order: prediction (lightest) → sentiment (API call, fast) → shadow (torch)
+    for name, loader in [
+        ("prediction", _ensure_prediction),
+        ("sentiment", _ensure_sentiment),
+        ("shadow", _ensure_shadow),
+    ]:
+        try:
+            ok = await loop.run_in_executor(None, loader)
+            logger.info("Background warmup: %s → %s", name, "loaded" if ok else "FAILED")
+        except Exception as e:
+            logger.error("Background warmup: %s failed: %s", name, e)
+
+    logger.info("Background warmup complete.")
+
+
+# ---------------------------------------------------------------------------
+# Lifespan — bind port first, then warm up in background
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("AlphaLens backend starting — models load on first request.")
+    logger.info("AlphaLens backend starting — warmup in background.")
+    warmup_task = asyncio.create_task(_background_warmup())
     yield
+    warmup_task.cancel()
+    try:
+        await warmup_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Shutting down AlphaLens backend.")
 
 

@@ -1,52 +1,92 @@
 """
-pipeline_loader.py – Singleton loader for the HuggingFace sentiment pipeline.
-Loads **mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis**
-lazily on first inference call (not at import/startup), so Render can bind
-the port before the model download begins.
+pipeline_loader.py – Sentiment analysis via the HuggingFace Inference API.
 
-CPU-only optimisations applied:
-    • ``device=-1``          → forces CPU execution
-    • ``torch_dtype=float32``→ full-precision (no GPU half-precision)
-    • ``truncation=True``    → guards against inputs > 512 tokens
-    • ``batch_size=8``       → process headlines in one forward pass
+Calls the serverless HF API instead of loading torch + transformers locally.
+This eliminates ~500MB of RAM usage, making it viable on Render's free tier.
+
+The returned object is a callable with the same interface as a local
+transformers pipeline: pipe(texts) → [{"label": ..., "score": ...}, ...]
 """
 from __future__ import annotations
 
+import os
 import logging
-import threading
-from transformers import pipeline as hf_pipeline
+import time
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
 _MODEL_ID = "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis"
+_API_URL = f"https://api-inference.huggingface.co/models/{_MODEL_ID}"
+_HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-_pipeline = None
-_lock = threading.Lock()          # prevents double-loading under concurrent requests
+_HEADERS = {"Content-Type": "application/json"}
+if _HF_TOKEN:
+    _HEADERS["Authorization"] = f"Bearer {_HF_TOKEN}"
+
+
+class _HFInferencePipeline:
+    """Callable wrapper that mimics the transformers pipeline interface.
+
+    Usage matches the local pipeline exactly::
+
+        pipe = get_sentiment_pipeline()
+        results = pipe(["headline 1", "headline 2"])
+        # → [{"label": "positive", "score": 0.92}, {"label": "negative", "score": 0.85}]
+    """
+
+    def __call__(self, texts: list[str]) -> list[dict]:
+        """Send texts to HF Inference API, return top label per text."""
+        payload = {"inputs": texts}
+
+        for attempt in range(3):
+            try:
+                response = httpx.post(
+                    _API_URL,
+                    headers=_HEADERS,
+                    json=payload,
+                    timeout=60.0,
+                )
+
+                # Model cold-start: HF returns 503 while loading
+                if response.status_code == 503:
+                    body = response.json()
+                    wait = min(body.get("estimated_time", 20), 30)
+                    logger.info(
+                        "HF model loading (attempt %d/3), waiting %.0fs...",
+                        attempt + 1, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                response.raise_for_status()
+                results = response.json()
+
+                # API returns [[{label, score}, ...], ...] per text (all labels).
+                # Local pipeline returns [{label, score}] per text (top label only).
+                # → take the first (highest-scoring) entry from each inner list.
+                return [labels[0] for labels in results]
+
+            except httpx.HTTPStatusError as e:
+                logger.error("HF API error (attempt %d/3): %s", attempt + 1, e)
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    raise
+            except httpx.TimeoutException:
+                logger.warning("HF API timeout (attempt %d/3)", attempt + 1)
+                if attempt < 2:
+                    time.sleep(2)
+                else:
+                    raise
+
+        raise RuntimeError("HF Inference API failed after 3 attempts")
+
+
+_pipeline = _HFInferencePipeline()
 
 
 def get_sentiment_pipeline():
-    """Return a cached HuggingFace ``sentiment-analysis`` pipeline.
-
-    The model is downloaded and initialised **on the first call only**.
-    Subsequent calls return the already-loaded pipeline immediately.
-    A threading lock ensures only one thread loads the model even when
-    multiple requests arrive simultaneously before loading completes.
-    """
-    global _pipeline
-
-    if _pipeline is not None:       # fast path — no lock needed
-        return _pipeline
-
-    with _lock:                     # slow path — only one thread loads
-        if _pipeline is None:       # double-checked locking
-            logger.info("Loading sentiment model: %s …", _MODEL_ID)
-            _pipeline = hf_pipeline(
-                task="sentiment-analysis",
-                model=_MODEL_ID,
-                device=-1,          # CPU only
-                truncation=True,
-                batch_size=8,
-            )
-            logger.info("Sentiment pipeline ready (CPU).")
-
+    """Return the HF Inference API wrapper (drop-in for transformers pipeline)."""
     return _pipeline
