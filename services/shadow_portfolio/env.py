@@ -82,7 +82,7 @@ class ShadowPortfolioEnv(gym.Env):
         rebalance_threshold: float = 0.005,  # 0.5% threshold (smoother alloc)
         return_weight: float = 10.0,      # Scale factor for return component
         drawdown_weight: float = 2.0,     # Penalty for portfolio drawdown
-        concentration_weight: float = 0.5, # Penalty for extreme allocations
+        concentration_weight: float = 0.0, # Penalty for extreme allocations
     ):
         super().__init__()
 
