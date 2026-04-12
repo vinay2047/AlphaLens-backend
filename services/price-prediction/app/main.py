@@ -4,7 +4,8 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 from redis.exceptions import RedisError
@@ -135,15 +136,32 @@ async def models_status() -> dict:
     }
 
 
-@app.post('/predict/{symbol}')
-async def predict(symbol: str, days: int = 7):
-    symbol = symbol.upper()
+class PredictPriceRequest(BaseModel):
+    ticker: str
+    open: list[float]
+    high: list[float]
+    low: list[float]
+    close: list[float]
+    volume: list[float]
+    days: int = 7
+
+@app.post('/predict')
+async def predict(req: PredictPriceRequest):
+    symbol = req.ticker.upper()
+    days = req.days
     cached = get_cached_prediction(symbol)
     if cached:
         return cached
 
     try:
-        result = await asyncio.to_thread(predict_symbol, symbol, days)
+        features = {
+            "open": req.open,
+            "high": req.high,
+            "low": req.low,
+            "close": req.close,
+            "volume": req.volume
+        }
+        result = await asyncio.to_thread(predict_symbol, symbol, days, features)
         cache_prediction(symbol, result)
         print(result)
         return result

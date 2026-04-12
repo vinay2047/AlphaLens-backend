@@ -29,7 +29,8 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Path, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, Path, HTTPException, WebSocket, WebSocketDisconnect, Query, Body
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 # ---------------------------------------------------------------------------
@@ -93,40 +94,55 @@ def _load_service_modules(service_dir: str, prefix: str, module_names: list[str]
         sys.modules.update(saved_app_modules)
 
 
-# -- Load sentiment service modules --
-_load_service_modules(
-    os.path.join(_ROOT, "services", "sentiment"),
-    "sentiment",
-    ["pipeline_loader", "analyzer", "headlines", "schemas"],
-)
+# -- Shadow portfolio --
+try:
+    _shadow_portfolio_dir = os.path.join(_ROOT, "services", "shadow_portfolio")
+    if _shadow_portfolio_dir not in sys.path:
+        sys.path.insert(0, _shadow_portfolio_dir)
+    from app.inference import load_model as shadow_load_model
+    from app.inference import run_inference
+    from app.schemas import InferenceRequest, InferenceResponse
+    _shadow_ok = True
+except Exception as e:
+    logger.error("Shadow portfolio import failed: %s", e, exc_info=True)
+    _shadow_ok = False
 
-# -- Load price prediction service modules --
-_load_service_modules(
-    os.path.join(_ROOT, "services", "price-prediction"),
-    "prediction",
-    ["config", "scaler_utils", "data_fetcher", "predictor"],
-)
+# -- Sentiment --
+try:
+    _load_service_modules(
+        os.path.join(_ROOT, "services", "sentiment"),
+        "sentiment",
+        ["pipeline_loader", "analyzer", "headlines", "schemas"],
+    )
+    _sentiment_ok = True
+except Exception as e:
+    logger.error("Sentiment import failed: %s", e, exc_info=True)
+    _sentiment_ok = False
 
-# -- Shadow portfolio uses a different import scheme (no bare `from app.`) --
-# Its inference.py already handles sys.path internally, so we can import directly.
-_shadow_portfolio_dir = os.path.join(_ROOT, "services", "shadow_portfolio")
-if _shadow_portfolio_dir not in sys.path:
-    sys.path.insert(0, _shadow_portfolio_dir)
-
-from app.inference import load_model as shadow_load_model  # noqa: E402
-from app.inference import run_inference                     # noqa: E402
-from app.schemas import InferenceRequest, InferenceResponse # noqa: E402
+# -- Price prediction --
+try:
+    _load_service_modules(
+        os.path.join(_ROOT, "services", "price-prediction"),
+        "prediction",
+        ["config", "scaler_utils", "data_fetcher", "predictor"],
+    )
+    _prediction_ok = True
+except Exception as e:
+    logger.error("Price prediction import failed: %s", e, exc_info=True)
+    _prediction_ok = False
 
 # Pull out the modules we need
-_get_headlines = _loaded["sentiment.headlines"].get_headlines
-_analyse_headlines = _loaded["sentiment.analyzer"].analyse_headlines
-_SentimentResponse = _loaded["sentiment.schemas"].SentimentResponse
-_get_sentiment_pipeline = _loaded["sentiment.pipeline_loader"].get_sentiment_pipeline
+if _sentiment_ok:
+    _get_headlines = _loaded["sentiment.headlines"].get_headlines
+    _analyse_headlines = _loaded["sentiment.analyzer"].analyse_headlines
+    _SentimentResponse = _loaded["sentiment.schemas"].SentimentResponse
+    _get_sentiment_pipeline = _loaded["sentiment.pipeline_loader"].get_sentiment_pipeline
 
-_predict_symbol = _loaded["prediction.predictor"].predict_symbol
-_get_available_symbols = _loaded["prediction.predictor"].get_available_symbols
-_load_all_models = _loaded["prediction.predictor"].load_all_models
-_MAJOR_COMPANIES = _loaded["prediction.config"].MAJOR_COMPANIES
+if _prediction_ok:
+    _predict_symbol = _loaded["prediction.predictor"].predict_symbol
+    _get_available_symbols = _loaded["prediction.predictor"].get_available_symbols
+    _load_all_models = _loaded["prediction.predictor"].load_all_models
+    _MAJOR_COMPANIES = _loaded["prediction.config"].MAJOR_COMPANIES
 
 
 # ---------------------------------------------------------------------------
@@ -185,28 +201,31 @@ def _cache_get(symbol: str) -> dict | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1. Sentiment pipeline
-    try:
-        logger.info("Loading sentiment pipeline ...")
-        _get_sentiment_pipeline()
-        logger.info("Sentiment pipeline ready.")
-    except Exception as e:
-        logger.warning("Sentiment model failed to load: %s", e)
+    if _sentiment_ok:
+        try:
+            logger.info("Loading sentiment pipeline ...")
+            _get_sentiment_pipeline()
+            logger.info("Sentiment pipeline ready.")
+        except Exception as e:
+            logger.warning("Sentiment model failed to load: %s", e)
 
     # 2. Price prediction models
-    try:
-        logger.info("Loading price prediction models ...")
-        loaded = _load_all_models()
-        logger.info("Price prediction models ready: %s", loaded)
-    except Exception as e:
-        logger.warning("Price prediction models failed to load: %s", e)
+    if _prediction_ok:
+        try:
+            logger.info("Loading price prediction models ...")
+            loaded = _load_all_models()
+            logger.info("Price prediction models ready: %s", loaded)
+        except Exception as e:
+            logger.warning("Price prediction models failed to load: %s", e)
 
     # 3. Shadow portfolio PPO
-    try:
-        logger.info("Loading shadow portfolio PPO model ...")
-        shadow_load_model()
-        logger.info("Shadow portfolio model ready.")
-    except Exception as e:
-        logger.warning("Shadow portfolio model failed to load: %s", e)
+    if _shadow_ok:
+        try:
+            logger.info("Loading shadow portfolio PPO model ...")
+            shadow_load_model()
+            logger.info("Shadow portfolio model ready.")
+        except Exception as e:
+            logger.warning("Shadow portfolio model failed to load: %s", e)
 
     yield
     logger.info("Shutting down AlphaLens backend.")
@@ -320,14 +339,31 @@ async def predict_batch(symbols: str, days: int = 7) -> dict:
     return results
 
 
-@app.post("/api/predict/{symbol}", tags=["Price Prediction"])
-async def predict(symbol: str, days: int = 7):
-    symbol = symbol.upper()
+class PredictPriceRequest(BaseModel):
+    ticker: str
+    open: list[float]
+    high: list[float]
+    low: list[float]
+    close: list[float]
+    volume: list[float]
+    days: int = 7
+
+@app.post("/api/predict", tags=["Price Prediction"])
+async def predict(req: PredictPriceRequest):
+    symbol = req.ticker.upper()
+    days = req.days
     cached = _cache_get(symbol)
     if cached:
         return cached
     try:
-        result = await asyncio.to_thread(_predict_symbol, symbol, days)
+        features = {
+            "open": req.open,
+            "high": req.high,
+            "low": req.low,
+            "close": req.close,
+            "volume": req.volume
+        }
+        result = await asyncio.to_thread(_predict_symbol, symbol, days, features)
         _cache_set(symbol, result)
         return result
     except ValueError as exc:
