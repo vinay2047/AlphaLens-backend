@@ -37,7 +37,7 @@ def _clean_company_name(profile_name: str) -> str:
     clean_name = re.sub(r'[^a-z0-9\s]', '', clean_name)
     return clean_name.strip()
 
-def get_headlines(ticker: str, count: int = 5, days_back: int = 7) -> list[dict]:
+def get_headlines(ticker: str, count: int = 5, days_back: int = 30) -> list[dict]:
     """Return the most *relevant* financial headlines for *ticker* using scoring."""
     if not finnhub_client:
         logger.error("Finnhub client is not initialized.")

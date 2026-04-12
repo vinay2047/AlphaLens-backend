@@ -284,6 +284,20 @@ async def _background_warmup():
 
     logger.info("Background warmup complete.")
 
+async def _keep_alive_task():
+    """Ping the server's public URL every 14 minutes to prevent Render from suspending it."""
+    import httpx
+    url = "https://alpha-lens-3464.onrender.com/"
+    while True:
+        await asyncio.sleep(14 * 60)  # 14 minutes
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.get(url, timeout=10.0)
+            logger.info("Keep-alive ping sent to %s", url)
+        except Exception as e:
+            logger.warning("Keep-alive ping failed: %s", e)
+
+
 
 # ---------------------------------------------------------------------------
 # Lifespan — bind port first, then warm up in background
@@ -293,10 +307,16 @@ async def _background_warmup():
 async def lifespan(app: FastAPI):
     logger.info("AlphaLens backend starting — warmup in background.")
     warmup_task = asyncio.create_task(_background_warmup())
+    keep_alive = asyncio.create_task(_keep_alive_task())
     yield
     warmup_task.cancel()
+    keep_alive.cancel()
     try:
         await warmup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await keep_alive
     except asyncio.CancelledError:
         pass
     logger.info("Shutting down AlphaLens backend.")
