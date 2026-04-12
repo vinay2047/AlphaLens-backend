@@ -18,35 +18,73 @@ This is stricter than a percentage-based split because:
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import requests
 import time
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def _create_session() -> requests.Session:
-    """Create a requests session with browser-like headers to avoid IP blocks."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    })
-    return session
+def _create_session():
+    """
+    Create a requests-compatible session that bypasses Yahoo's bot detection.
+
+    Tries curl_cffi first (TLS fingerprint impersonation — most reliable on
+    cloud servers), falls back to a standard requests.Session with browser
+    headers if curl_cffi is unavailable.
+    """
+    try:
+        from curl_cffi.requests import Session
+        session = Session(impersonate="chrome")
+        logger.info("Using curl_cffi session (TLS impersonation enabled)")
+        return session
+    except ImportError:
+        import requests
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        })
+        logger.info("curl_cffi not available, using requests session with browser UA")
+        return session
+
+
+def _try_download(ticker: str, start: str, end: str, session) -> pd.DataFrame:
+    """Attempt download via yf.download()."""
+    df = yf.download(
+        ticker, start=start, end=end,
+        auto_adjust=True, progress=False,
+        session=session,
+    )
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].dropna()
+    return df
+
+
+def _try_ticker_history(ticker: str, start: str, end: str, session) -> pd.DataFrame:
+    """Fallback: use yf.Ticker().history() which hits a different Yahoo endpoint."""
+    t = yf.Ticker(ticker, session=session)
+    df = t.history(start=start, end=end, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns]
+    df = df[cols].dropna()
+    return df
 
 
 def fetch_data(ticker: str = "SPY", start: str = "2010-01-01",
                end: str = "2022-12-31", max_retries: int = 3) -> pd.DataFrame:
     """
-    Download OHLCV data via yfinance with retry logic.
+    Download OHLCV data via yfinance with retry + fallback logic.
 
-    Uses a custom requests session with browser-like headers to avoid
-    Yahoo Finance blocking cloud server IPs (e.g., Render, AWS, GCP).
+    Strategy (per attempt):
+      1. yf.download() with curl_cffi TLS impersonation session
+      2. yf.Ticker().history() fallback (different Yahoo API endpoint)
 
     Args:
         ticker: Yahoo Finance symbol (default: SPY as market proxy).
@@ -61,38 +99,29 @@ def fetch_data(ticker: str = "SPY", start: str = "2010-01-01",
     logger.info("Downloading %s from %s to %s...", ticker, start, end)
 
     for attempt in range(1, max_retries + 1):
+        # --- Strategy 1: yf.download() ---
         try:
-            df = yf.download(
-                ticker, start=start, end=end,
-                auto_adjust=True, progress=False,
-                session=session,
-            )
-
-            # Recent yfinance versions may return MultiIndex columns for single ticker
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-            df = df.dropna()
-
+            df = _try_download(ticker, start, end, session)
             if len(df) > 0:
-                logger.info("Downloaded %d trading days (attempt %d).", len(df), attempt)
+                logger.info("Downloaded %d days via yf.download() (attempt %d).", len(df), attempt)
                 return df
-
-            logger.warning(
-                "yfinance returned 0 rows for %s (attempt %d/%d)",
-                ticker, attempt, max_retries,
-            )
         except Exception as e:
-            logger.warning(
-                "yfinance download error for %s (attempt %d/%d): %s",
-                ticker, attempt, max_retries, e,
-            )
+            logger.warning("yf.download() failed for %s (attempt %d): %s", ticker, attempt, e)
+
+        # --- Strategy 2: yf.Ticker().history() fallback ---
+        try:
+            df = _try_ticker_history(ticker, start, end, session)
+            if len(df) > 0:
+                logger.info("Downloaded %d days via Ticker.history() (attempt %d).", len(df), attempt)
+                return df
+        except Exception as e:
+            logger.warning("Ticker.history() failed for %s (attempt %d): %s", ticker, attempt, e)
 
         if attempt < max_retries:
-            time.sleep(2 * attempt)  # back off: 2s, 4s
+            wait = 2 * attempt
+            logger.info("Waiting %ds before retry...", wait)
+            time.sleep(wait)
 
-    # Final fallback: return whatever we got (may be empty)
     logger.error("All %d download attempts failed for %s.", max_retries, ticker)
     return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
 
