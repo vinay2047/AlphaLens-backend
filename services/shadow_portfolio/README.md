@@ -58,7 +58,7 @@ python evaluate.py
 | `env.py` | Custom Gymnasium environment (17-dim obs, DSR reward) |
 | `train.py` | PPO training pipeline with VecNormalize |
 | `evaluate.py` | Test evaluation + performance comparison plots |
-| `run_colab.py` | Single-file Colab-compatible entry point |
+
 
 ## Key Design Decisions
 

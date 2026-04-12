@@ -70,6 +70,7 @@ def predict_symbol(symbol: str, days_ahead: int = 7) -> dict:
     # Short-circuit robust Mock Mode execution to avoid Pandas 3.0 / yfinance crashes
     if not TRY_TENSORFLOW:
         import random
+        # Just use a dummy starting price, the Next.js frontend fetches the exact live price anyway.
         import yfinance as yf
         try:
             # Query recent days to guarantee a valid closing price even over weekends/holidays
@@ -78,7 +79,7 @@ def predict_symbol(symbol: str, days_ahead: int = 7) -> dict:
             current_price = float(ticker_data['Close'].iloc[-1])
         except Exception as exc:
             print(f"Warning: Failed to fetch live price for {symbol}: {exc}")
-            current_price = 150.0 
+        current_price = 150.0 
         
         forecast = []
         last_price = current_price
