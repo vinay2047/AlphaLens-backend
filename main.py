@@ -200,32 +200,7 @@ def _cache_get(symbol: str) -> dict | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Sentiment pipeline
-    if _sentiment_ok:
-        try:
-            logger.info("Loading sentiment pipeline ...")
-            _get_sentiment_pipeline()
-            logger.info("Sentiment pipeline ready.")
-        except Exception as e:
-            logger.warning("Sentiment model failed to load: %s", e)
-
-    # 2. Price prediction models
-    if _prediction_ok:
-        try:
-            logger.info("Loading price prediction models ...")
-            loaded = _load_all_models()
-            logger.info("Price prediction models ready: %s", loaded)
-        except Exception as e:
-            logger.warning("Price prediction models failed to load: %s", e)
-
-    # 3. Shadow portfolio PPO
-    if _shadow_ok:
-        try:
-            logger.info("Loading shadow portfolio PPO model ...")
-            shadow_load_model()
-            logger.info("Shadow portfolio model ready.")
-        except Exception as e:
-            logger.warning("Shadow portfolio model failed to load: %s", e)
+    logger.info("AlphaLens backend starting — models load on first request.")
 
     yield
     logger.info("Shutting down AlphaLens backend.")
