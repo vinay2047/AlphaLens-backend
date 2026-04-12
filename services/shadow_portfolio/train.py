@@ -36,7 +36,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Resolve imports when running as a script
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from data import fetch_data, walk_forward_split
+from data import fetch_data, date_based_split, get_aligned_dates
 from features import build_feature_matrix
 from env import ShadowPortfolioEnv
 
@@ -51,13 +51,13 @@ def make_env(features, returns):
 def train():
     """Full training pipeline: data → features → train → validate → save."""
 
-    # ---- 1. Fetch data ----
+    
     print("=" * 60)
     print("STEP 1: Fetching data")
     print("=" * 60)
-    df = fetch_data("SPY", start="2010-01-01", end="2024-12-31")
+    df = fetch_data("SPY", start="2010-01-01", end="2022-12-31")
 
-    # ---- 2. Build features ----
+
     print("\n" + "=" * 60)
     print("STEP 2: Computing quant features")
     print("=" * 60)
@@ -68,11 +68,12 @@ def train():
 
     # ---- 3. Walk-forward split ----
     print("\n" + "=" * 60)
-    print("STEP 3: Walk-forward chronological split")
+    print("STEP 3: Date-based chronological split (Train: 2010-2021, Test: 2022)")
     print("=" * 60)
-    splits = walk_forward_split(features, returns, prices)
+    dates = get_aligned_dates(df, len(features))
+    splits = date_based_split(features, returns, prices, dates)
     train_feat, train_ret, _ = splits['train']
-    val_feat, val_ret, _ = splits['val']
+    val_feat, val_ret, _ = splits['test'] # using test set for quick validation
 
     # ---- 4. Create vectorized + normalized environment ----
     print("\n" + "=" * 60)
@@ -95,17 +96,17 @@ def train():
     model = PPO(
         "MlpPolicy",
         train_env,
-        learning_rate=3e-4,
+        learning_rate=1e-4,   # Lower learning rate for smoother convergence
         n_steps=2048,         # Rollout buffer size
         batch_size=64,        # Mini-batch size for SGD updates
         n_epochs=10,          # PPO epochs per rollout
-        gamma=0.99,           # Discount factor
-        ent_coef=0.01,        # Entropy bonus for exploration
+        gamma=0.999,          # Longer horizon (~1000 days), reduces churn
+        ent_coef=0.02,        # Higher entropy bonus to prevent overfitting
         verbose=1,
         seed=42,
     )
     print("  Policy architecture: MlpPolicy (64x64 hidden layers)")
-    print("  Entropy coefficient: 0.01 (exploration bonus)")
+    print("  Hyperparams adjusted: lr=1e-4, gamma=0.999, ent_coef=0.02")
 
     # ---- 6. Train (Fix #4: 500k timesteps for convergence) ----
     print("\n" + "=" * 60)

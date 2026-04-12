@@ -90,9 +90,7 @@ class ShadowPortfolioEnv(gym.Env):
         self.rebalance_threshold = rebalance_threshold
         self.return_weight = return_weight
 
-        # ---- Fix #3: Daily risk-free rate for cash returns ----
-        # rf_daily = (1 + rf_annual)^(1/252) - 1 ≈ rf_annual / 252
-        # Using the simple approximation for small rates
+       
         self.daily_rf = risk_free_annual / 252.0
 
         # ---- Fix #1: Observation space is strictly 17-dimensional ----
