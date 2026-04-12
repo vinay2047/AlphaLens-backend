@@ -1,0 +1,8 @@
+# Ensure model artifacts are treated as binary by git.
+# Prevents line-ending conversion (CRLF → LF) from corrupting
+# PyTorch checkpoints during cross-platform checkout.
+*.zip binary
+*.pkl binary
+*.pth binary
+*.pt binary
+*.png binary
