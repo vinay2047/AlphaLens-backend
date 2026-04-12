@@ -1,0 +1,17 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# RL Agent Models & Stats
+saved_models/
+*.zip
+*.pkl
+
+# Environments
+.venv/
+env/
+venv/
+
+# Results
+evaluation_results.png
