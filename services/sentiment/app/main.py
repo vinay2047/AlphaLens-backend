@@ -16,10 +16,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Path
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.headlines import get_headlines
-from app.analyzer import analyse_headlines
-from app.pipeline_loader import get_sentiment_pipeline
-from app.schemas import SentimentResponse
+from services.sentiment.app.headlines import get_headlines
+from services.sentiment.app.analyzer import analyse_headlines
+from services.sentiment.app.pipeline_loader import get_sentiment_pipeline
+from services.sentiment.app.schemas import SentimentResponse
 
 # ---------------------------------------------------------------------------
 # Logging

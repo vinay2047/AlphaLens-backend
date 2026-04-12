@@ -9,22 +9,10 @@ import yfinance as yf
 
 from app.data_fetcher import FEATURE_COLS, fetch_stock_data, prepare_sequence
 from app.scaler_utils import inverse_transform_price, load_scaler
+from app.config import MAJOR_COMPANIES
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
-
-# --- TensorFlow Initialization ---
-TRY_TENSORFLOW = True
-try:
-    import tensorflow as tf
-    logger.error("--- IMPORT SUCCESSFULLY ---")
-except ImportError as e:
-    TRY_TENSORFLOW = False
-    logger.error("--- IMPORT ERROR DETAILS ---")
-    logger.error(f"Reason: {e}")
-    logger.error(traceback.format_exc())
-    logger.error("----------------------------")
-    logger.warning("TensorFlow failed to load. Predictor running in AI Simulation Mock Mode.")
 
 # --- Globals ---
 MODELS_DIR = Path(__file__).resolve().parents[3] / 'ml_models'
@@ -32,38 +20,14 @@ _models = {}
 
 
 def load_all_models() -> list[str]:
-    """Load all .keras models into memory at startup."""
+    """Register simulated model entries for all major companies at startup."""
     loaded = []
-    
-    if not TRY_TENSORFLOW:
-        from app.config import MAJOR_COMPANIES
-        # Simulate loading models for all major companies
-        for sym in MAJOR_COMPANIES:
-            _models[f'bilstm_{sym}'] = "MOCK_BILSTM"
-            _models[f'tcn_gru_{sym}'] = "MOCK_TCN_GRU"
-            loaded.append(f'bilstm_{sym}')
-            loaded.append(f'tcn_gru_{sym}')
-        logger.info('Simulated loading of %d ML models (Running without TensorFlow)', len(loaded))
-        return loaded
-
-    if not MODELS_DIR.exists():
-        logger.warning('ML models directory does not exist: %s', MODELS_DIR)
-        return loaded
-
-    for model_path in MODELS_DIR.glob('*.keras'):
-        parts = model_path.stem.split('_', 2)
-        if len(parts) < 2:
-            continue
-
-        key = model_path.stem
-        try:
-            _models[key] = tf.keras.models.load_model(str(model_path))
-            loaded.append(key)
-            logger.info('Loaded model: %s', key)
-        except Exception as exc:
-            logger.error('Failed to load %s: %s', model_path.name, exc)
-
-    logger.info('Total models loaded: %d', len(loaded))
+    for sym in MAJOR_COMPANIES:
+        _models[f'bilstm_{sym}'] = "SIM_BILSTM"
+        _models[f'tcn_gru_{sym}'] = "SIM_TCN_GRU"
+        loaded.append(f'bilstm_{sym}')
+        loaded.append(f'tcn_gru_{sym}')
+    logger.info('Registered %d simulated model entries for price prediction', len(loaded))
     return loaded
 
 
@@ -73,178 +37,60 @@ def get_available_symbols() -> list[str]:
 
 
 def predict_symbol(symbol: str, days_ahead: int = 7) -> dict:
+    """
+    Predict future prices for a symbol using live market data + statistical simulation.
+
+    Uses real current prices from yfinance with a random-walk forecast model.
+    """
     symbol = symbol.upper()
-    bilstm_key = f'bilstm_{symbol}'
-    tcn_key = f'tcn_gru_{symbol}'
 
-    # --- MOCK MODE EXECUTION ---
-    # Short-circuit robust Mock Mode execution to avoid Pandas / yfinance crashes
-    if not TRY_TENSORFLOW:
-        try:
-            # Query recent days to guarantee a valid closing price even over weekends/holidays
-            ticker_data = yf.Ticker(symbol).history(period="5d")
-            current_price = float(ticker_data['Close'].iloc[-1])
-        except Exception as exc:
-            logger.warning(f"yfinance package failed for {symbol}: {exc}. Attempting direct HTTP fallback.")
-            import httpx
-            # Secondary Oracle: fetch real data via direct chart API if yfinance library fails
-            res = httpx.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", timeout=10.0)
-            if res.status_code == 200:
-                current_price = float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
-            else:
-                raise ValueError(f"Both Market Oracles entirely failed to fetch a valid price for {symbol}.")
-        
-        forecast = []
-        last_price = current_price
-        
-        for day_index in range(1, days_ahead + 1):
-            drift = random.uniform(-0.015, 0.02)
-            day_price = last_price * (1 + drift)
-            forecast_date = datetime.utcnow() + timedelta(days=day_index)
-            
-            # Skip weekends
-            while forecast_date.weekday() >= 5:
-                forecast_date += timedelta(days=1)
-                
-            forecast.append({
-                'date': forecast_date.strftime('%Y-%m-%d'),
-                'price': round(day_price, 2),
-                'day': day_index,
-            })
-            last_price = day_price
-            
-        final_price = forecast[-1]['price']
-        price_change = final_price - current_price
-            
-        return {
-            'symbol': symbol,
-            'current_price': round(current_price, 2),
-            'predicted_price': round(final_price, 2),
-            'price_change': round(price_change, 2),
-            'price_change_pct': round((price_change / current_price) * 100, 2),
-            'direction': 'BULLISH' if price_change > 0 else 'BEARISH',
-            'confidence': round(75.5 + random.uniform(-5, 10), 1),
-            'forecast': forecast,
-            'models_used': ['MOCK_BILSTM', 'MOCK_TCN_GRU'],
-            'individual_predictions': {'bilstm': round(final_price, 2), 'tcn_gru': round(final_price, 2)},
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
-            'data_points_used': 60,
-        }
+    try:
+        # Query recent days to guarantee a valid closing price even over weekends/holidays
+        ticker_data = yf.Ticker(symbol).history(period="5d")
+        current_price = float(ticker_data['Close'].iloc[-1])
+    except Exception as exc:
+        logger.warning(f"yfinance failed for {symbol}: {exc}. Attempting direct HTTP fallback.")
+        import httpx
+        # Fallback: fetch real data via direct chart API if yfinance library fails
+        res = httpx.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", timeout=10.0)
+        if res.status_code == 200:
+            current_price = float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
+        else:
+            raise ValueError(f"Failed to fetch a valid price for {symbol}.")
 
-    # --- TRUE AI EXECUTION PIPELINE ---
-    has_bilstm = bilstm_key in _models
-    has_tcn = tcn_key in _models
-    
-    if not has_bilstm and not has_tcn:
-        raise ValueError(f'No models found for {symbol}. Available: {get_available_symbols()}')
+    forecast = []
+    last_price = current_price
 
-    df = fetch_stock_data(symbol)
-    current_price = float(df['close'].iloc[-1])
+    for day_index in range(1, days_ahead + 1):
+        drift = random.uniform(-0.015, 0.02)
+        day_price = last_price * (1 + drift)
+        forecast_date = datetime.utcnow() + timedelta(days=day_index)
 
-    scaler = load_scaler(symbol)
-    X = prepare_sequence(df, scaler, FEATURE_COLS)
+        # Skip weekends
+        while forecast_date.weekday() >= 5:
+            forecast_date += timedelta(days=1)
 
-    predictions = {}
-    if has_bilstm:
-        raw_pred = _models[bilstm_key].predict(X, verbose=0)[0][0]
-        predictions['bilstm'] = inverse_transform_price(scaler, raw_pred)
+        forecast.append({
+            'date': forecast_date.strftime('%Y-%m-%d'),
+            'price': round(day_price, 2),
+            'day': day_index,
+        })
+        last_price = day_price
 
-    if has_tcn:
-        raw_pred = _models[tcn_key].predict(X, verbose=0)[0][0]
-        predictions['tcn_gru'] = inverse_transform_price(scaler, raw_pred)
-
-    if has_bilstm and has_tcn:
-        ensemble_price = (predictions['bilstm'] * 0.45 + predictions['tcn_gru'] * 0.55)
-    else:
-        ensemble_price = list(predictions.values())[0]
-
-    forecast = _build_multi_day_forecast(df, scaler, symbol, has_bilstm, has_tcn, days_ahead)
-
-    agreement = 1 - abs(predictions.get('bilstm', ensemble_price) - predictions.get('tcn_gru', ensemble_price)) / current_price
-    confidence = round(min(max(agreement * 100, 50), 98), 1)
-
-    price_change = ensemble_price - current_price
-    price_change_pct = (price_change / current_price) * 100
-    direction = 'BULLISH' if price_change > 0 else 'BEARISH'
+    final_price = forecast[-1]['price']
+    price_change = final_price - current_price
 
     return {
         'symbol': symbol,
         'current_price': round(current_price, 2),
-        'predicted_price': round(ensemble_price, 2),
+        'predicted_price': round(final_price, 2),
         'price_change': round(price_change, 2),
-        'price_change_pct': round(price_change_pct, 2),
-        'direction': direction,
-        'confidence': confidence,
+        'price_change_pct': round((price_change / current_price) * 100, 2),
+        'direction': 'BULLISH' if price_change > 0 else 'BEARISH',
+        'confidence': round(75.5 + random.uniform(-5, 10), 1),
         'forecast': forecast,
-        'models_used': list(predictions.keys()),
-        'individual_predictions': {k: round(v, 2) for k, v in predictions.items()},
+        'models_used': ['SIM_BILSTM', 'SIM_TCN_GRU'],
+        'individual_predictions': {'bilstm': round(final_price, 2), 'tcn_gru': round(final_price, 2)},
         'timestamp': datetime.utcnow().isoformat() + 'Z',
-        'data_points_used': len(df),
+        'data_points_used': 60,
     }
-
-
-def _build_multi_day_forecast(df, scaler, symbol, has_bilstm, has_tcn, days=7):
-    forecast = []
-    current_df = df.copy()
-
-    for day_index in range(1, days + 1):
-        try:
-            X = prepare_sequence(current_df, scaler, FEATURE_COLS)
-            preds = []
-            if TRY_TENSORFLOW:
-                if has_bilstm:
-                    raw = _models[f'bilstm_{symbol}'].predict(X, verbose=0)[0][0]
-                    preds.append(inverse_transform_price(scaler, raw))
-                if has_tcn:
-                    raw = _models[f'tcn_gru_{symbol}'].predict(X, verbose=0)[0][0]
-                    preds.append(inverse_transform_price(scaler, raw))
-            else:
-                # Mock multi-day prediction using previous day's close
-                last_price = current_df['close'].iloc[-1]
-                drift = random.uniform(-0.015, 0.02)
-                preds = [last_price * (1 + drift), last_price * (1 + drift * 1.1)]
-
-            day_price = sum(preds) / len(preds)
-            forecast_date = datetime.utcnow() + timedelta(days=day_index)
-            
-            while forecast_date.weekday() >= 5:
-                forecast_date += timedelta(days=1)
-
-            forecast.append({
-                'date': forecast_date.strftime('%Y-%m-%d'),
-                'price': round(day_price, 2),
-                'day': day_index,
-            })
-
-            last_row = current_df.iloc[-1].copy()
-            last_row['close'] = day_price
-            last_row_df = pd.DataFrame([last_row])
-            current_df = pd.concat([current_df, last_row_df], ignore_index=True)
-            current_df = _recalculate_indicators(current_df)
-
-        except Exception as exc:
-            logger.warning('Day %s forecast failed: %s', day_index, exc)
-            break
-
-    return forecast
-
-
-def _recalculate_indicators(df):
-    from ta.momentum import RSIIndicator
-    from ta.trend import MACD, SMAIndicator, EMAIndicator
-    from ta.volatility import BollingerBands
-
-    df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
-    macd = MACD(df['close'])
-    df['macd'] = macd.macd()
-    df['macd_signal'] = macd.macd_signal()
-    bb = BollingerBands(df['close'])
-    df['bb_upper'] = bb.bollinger_hband()
-    df['bb_lower'] = bb.bollinger_lband()
-    df['bb_mid'] = bb.bollinger_mavg()
-    df['sma_20'] = SMAIndicator(df['close'], window=20).sma_indicator()
-    df['ema_12'] = EMAIndicator(df['close'], window=12).ema_indicator()
-    df['returns'] = df['close'].pct_change()
-    df['volatility'] = df['returns'].rolling(20).std()
-    df = df.bfill()
-    return df

@@ -9,7 +9,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-from app.pipeline_loader import get_sentiment_pipeline
+from services.sentiment.app.pipeline_loader import get_sentiment_pipeline
 
 
 
