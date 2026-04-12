@@ -243,6 +243,9 @@ def run_inference(
     dates = get_aligned_dates(df, len(features))
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date)
+    if dates.tz is not None:
+        start_ts = start_ts.tz_localize(dates.tz)
+        end_ts = end_ts.tz_localize(dates.tz)
 
     mask = (dates >= start_ts) & (dates <= end_ts)
     idx = np.where(mask)[0]
