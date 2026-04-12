@@ -1,0 +1,17 @@
+{
+  "description": "Registry for local AlphaLens ML models.",
+  "models": [
+    {
+      "name": "bilstm_AAPL",
+      "symbol": "AAPL",
+      "type": "bilstm",
+      "path": "bilstm_AAPL.keras"
+    },
+    {
+      "name": "tcn_gru_AAPL",
+      "symbol": "AAPL",
+      "type": "tcn_gru",
+      "path": "tcn_gru_AAPL.keras"
+    }
+  ]
+}
