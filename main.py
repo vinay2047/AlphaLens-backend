@@ -13,11 +13,10 @@ Swagger UI:  http://localhost:8000/docs
 
 Import strategy
 ---------------
-Each service has its own `app/` sub-package with internal `from app.X` imports.
-To avoid namespace collisions, we add each service's root to sys.path just
-before importing that service's modules, then remove it after. The sentinel
-`app` entry in sys.modules is swapped per service so that internal imports
-within each service resolve to the correct `app/` package.
+Heavy ML libraries (torch, transformers, stable_baselines3) are loaded LAZILY
+on first API request — NOT at module import time. This ensures uvicorn can bind
+the port within Render's timeout window (~5 minutes), since torch alone can take
+60+ seconds to import on small instances.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ import sys
 import importlib
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Path, HTTPException, WebSocket, WebSocketDisconnect, Query, Body
@@ -48,14 +48,19 @@ logger = logging.getLogger("alphalens")
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------------------------------------------------------------------
-# Service module loader
+# Lazy service loader
 # ---------------------------------------------------------------------------
-# Because each service uses bare `from app.X import Y` internally,
-# we need to temporarily add each service directory to sys.path and
-# rebind `app` in sys.modules, then stash the loaded modules under
-# unique prefixed names.
+# All heavy ML imports are deferred to first use. Each service has a lock to
+# prevent double-loading under concurrent requests, and a status flag to
+# avoid retrying after a permanent failure.
 
-_loaded = {}  # stash of loaded modules: "sentiment.headlines" → module
+_loaded = {}          # stash of loaded modules: "sentiment.headlines" → module
+_service_status = {}  # "sentiment" → True/False/None (None = not yet tried)
+_service_locks = {
+    "shadow": threading.Lock(),
+    "sentiment": threading.Lock(),
+    "prediction": threading.Lock(),
+}
 
 
 def _load_service_modules(service_dir: str, prefix: str, module_names: list[str]):
@@ -94,81 +99,126 @@ def _load_service_modules(service_dir: str, prefix: str, module_names: list[str]
         sys.modules.update(saved_app_modules)
 
 
-# -- Shadow portfolio --
-try:
-    _shadow_portfolio_dir = os.path.join(_ROOT, "services", "shadow_portfolio")
-    if _shadow_portfolio_dir not in sys.path:
-        sys.path.insert(0, _shadow_portfolio_dir)
-    from app.inference import load_model as shadow_load_model
-    from app.inference import run_inference
-    from app.schemas import InferenceRequest, InferenceResponse
-    _shadow_ok = True
-except Exception as e:
-    logger.error("Shadow portfolio import failed: %s", e, exc_info=True)
-    _shadow_ok = False
+# ---------------------------------------------------------------------------
+# Lazy loaders — called on first request, NOT at import time
+# ---------------------------------------------------------------------------
 
-# -- Sentiment --
-try:
-    _load_service_modules(
-        os.path.join(_ROOT, "services", "sentiment"),
-        "sentiment",
-        ["pipeline_loader", "analyzer", "headlines", "schemas"],
-    )
-    _sentiment_ok = True
-except Exception as e:
-    logger.error("Sentiment import failed: %s", e, exc_info=True)
-    _sentiment_ok = False
+def _ensure_shadow():
+    """Lazily load the shadow portfolio service."""
+    status = _service_status.get("shadow")
+    if status is not None:
+        return status  # already loaded (True) or failed (False)
 
-# -- Price prediction --
-try:
-    _load_service_modules(
-        os.path.join(_ROOT, "services", "price-prediction"),
-        "prediction",
-        ["config", "scaler_utils", "data_fetcher", "predictor"],
-    )
-    _prediction_ok = True
-except Exception as e:
-    logger.error("Price prediction import failed: %s", e, exc_info=True)
-    _prediction_ok = False
+    with _service_locks["shadow"]:
+        # Double-check after acquiring lock
+        if _service_status.get("shadow") is not None:
+            return _service_status["shadow"]
 
-# Pull out the modules we need
-if _sentiment_ok:
-    _get_headlines = _loaded["sentiment.headlines"].get_headlines
-    _analyse_headlines = _loaded["sentiment.analyzer"].analyse_headlines
-    _SentimentResponse = _loaded["sentiment.schemas"].SentimentResponse
-    _get_sentiment_pipeline = _loaded["sentiment.pipeline_loader"].get_sentiment_pipeline
+        try:
+            logger.info("Loading shadow portfolio service...")
+            shadow_dir = os.path.join(_ROOT, "services", "shadow_portfolio")
+            if shadow_dir not in sys.path:
+                sys.path.insert(0, shadow_dir)
+            from app.inference import load_model as shadow_load_model
+            from app.inference import run_inference
+            from app.schemas import InferenceRequest, InferenceResponse
 
-if _prediction_ok:
-    _predict_symbol = _loaded["prediction.predictor"].predict_symbol
-    _get_available_symbols = _loaded["prediction.predictor"].get_available_symbols
-    _load_all_models = _loaded["prediction.predictor"].load_all_models
-    _MAJOR_COMPANIES = _loaded["prediction.config"].MAJOR_COMPANIES
+            _loaded["shadow.load_model"] = shadow_load_model
+            _loaded["shadow.run_inference"] = run_inference
+            _loaded["shadow.InferenceRequest"] = InferenceRequest
+            _loaded["shadow.InferenceResponse"] = InferenceResponse
+
+            _service_status["shadow"] = True
+            logger.info("Shadow portfolio service loaded.")
+            return True
+        except Exception as e:
+            logger.error("Shadow portfolio import failed: %s", e, exc_info=True)
+            _service_status["shadow"] = False
+            return False
+
+
+def _ensure_sentiment():
+    """Lazily load the sentiment analysis service."""
+    status = _service_status.get("sentiment")
+    if status is not None:
+        return status
+
+    with _service_locks["sentiment"]:
+        if _service_status.get("sentiment") is not None:
+            return _service_status["sentiment"]
+
+        try:
+            logger.info("Loading sentiment service...")
+            _load_service_modules(
+                os.path.join(_ROOT, "services", "sentiment"),
+                "sentiment",
+                ["pipeline_loader", "analyzer", "headlines", "schemas"],
+            )
+            _service_status["sentiment"] = True
+            logger.info("Sentiment service loaded.")
+            return True
+        except Exception as e:
+            logger.error("Sentiment import failed: %s", e, exc_info=True)
+            _service_status["sentiment"] = False
+            return False
+
+
+def _ensure_prediction():
+    """Lazily load the price prediction service."""
+    status = _service_status.get("prediction")
+    if status is not None:
+        return status
+
+    with _service_locks["prediction"]:
+        if _service_status.get("prediction") is not None:
+            return _service_status["prediction"]
+
+        try:
+            logger.info("Loading price prediction service...")
+            _load_service_modules(
+                os.path.join(_ROOT, "services", "price-prediction"),
+                "prediction",
+                ["config", "scaler_utils", "data_fetcher", "predictor"],
+            )
+            _service_status["prediction"] = True
+            logger.info("Price prediction service loaded.")
+            return True
+        except Exception as e:
+            logger.error("Price prediction import failed: %s", e, exc_info=True)
+            _service_status["prediction"] = False
+            return False
 
 
 # ---------------------------------------------------------------------------
 # Redis (optional — graceful fallback if unavailable)
 # ---------------------------------------------------------------------------
 import json
-from redis import Redis
-from redis.exceptions import RedisError
 
-REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+REDIS_HOST = os.environ.get("REDIS_HOST", "")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
 REDIS_TTL = int(os.environ.get("REDIS_TTL_SECONDS", "300"))
 
-try:
-    redis_client = Redis(
-        host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
-        decode_responses=True, socket_connect_timeout=2,
-    )
-    redis_client.ping()
-    _redis_ok = True
-    logger.info("Redis connected at %s:%s", REDIS_HOST, REDIS_PORT)
-except Exception:
-    redis_client = None
-    _redis_ok = False
-    logger.warning("Redis unavailable — prediction caching disabled.")
+_redis_ok = False
+redis_client = None
+
+if REDIS_HOST:
+    try:
+        from redis import Redis
+        from redis.exceptions import RedisError
+        redis_client = Redis(
+            host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB,
+            decode_responses=True, socket_connect_timeout=2,
+        )
+        redis_client.ping()
+        _redis_ok = True
+        logger.info("Redis connected at %s:%s", REDIS_HOST, REDIS_PORT)
+    except Exception:
+        redis_client = None
+        _redis_ok = False
+        logger.warning("Redis unavailable — prediction caching disabled.")
+else:
+    logger.info("REDIS_HOST not set — prediction caching disabled.")
 
 
 def _cache_set(symbol: str, payload: dict) -> None:
@@ -176,7 +226,7 @@ def _cache_set(symbol: str, payload: dict) -> None:
         return
     try:
         redis_client.set(f"prediction:{symbol}", json.dumps(payload), ex=REDIS_TTL)
-    except RedisError as exc:
+    except Exception as exc:
         logger.warning("Redis write failed: %s", exc)
 
 
@@ -190,24 +240,23 @@ def _cache_get(symbol: str) -> dict | None:
         payload = json.loads(raw)
         payload["cached"] = True
         return payload
-    except RedisError:
+    except Exception:
         return None
 
 
 # ---------------------------------------------------------------------------
-# Lifespan — warm up all models at startup
+# Lifespan
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("AlphaLens backend starting — models load on first request.")
-
     yield
     logger.info("Shutting down AlphaLens backend.")
 
 
 # ---------------------------------------------------------------------------
-# App
+# App — this must execute FAST so uvicorn can bind the port immediately
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
@@ -241,6 +290,11 @@ async def root():
     return {
         "status": "ok",
         "service": "alphalens-backend",
+        "services_loaded": {
+            "sentiment": _service_status.get("sentiment", "not_loaded"),
+            "prediction": _service_status.get("prediction", "not_loaded"),
+            "shadow": _service_status.get("shadow", "not_loaded"),
+        },
         "endpoints": {
             "sentiment": "/api/sentiment/{ticker}",
             "predict": "/api/predict/{symbol}",
@@ -255,7 +309,6 @@ async def root():
 
 @app.get(
     "/api/sentiment/{ticker}",
-    response_model=_SentimentResponse,
     tags=["Sentiment"],
     summary="Analyse sentiment for a stock ticker",
 )
@@ -266,6 +319,13 @@ async def get_sentiment(
         examples=["AAPL"],
     ),
 ):
+    if not _ensure_sentiment():
+        raise HTTPException(status_code=503, detail="Sentiment service unavailable.")
+
+    _get_headlines = _loaded["sentiment.headlines"].get_headlines
+    _analyse_headlines = _loaded["sentiment.analyzer"].analyse_headlines
+    _SentimentResponse = _loaded["sentiment.schemas"].SentimentResponse
+
     ticker = ticker.upper()
     logger.info("Sentiment request: %s", ticker)
 
@@ -290,6 +350,9 @@ async def get_sentiment(
 
 @app.get("/api/predict/models/status", tags=["Price Prediction"])
 async def models_status():
+    if not _ensure_prediction():
+        raise HTTPException(status_code=503, detail="Prediction service unavailable.")
+    _get_available_symbols = _loaded["prediction.predictor"].get_available_symbols
     return {
         "available_symbols": _get_available_symbols(),
         "total": len(_get_available_symbols()),
@@ -298,6 +361,10 @@ async def models_status():
 
 @app.get("/api/predict/batch", tags=["Price Prediction"])
 async def predict_batch(symbols: str, days: int = 7) -> dict:
+    if not _ensure_prediction():
+        raise HTTPException(status_code=503, detail="Prediction service unavailable.")
+    _predict_symbol = _loaded["prediction.predictor"].predict_symbol
+
     symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     results = {}
     for sym in symbol_list:
@@ -325,6 +392,10 @@ class PredictPriceRequest(BaseModel):
 
 @app.post("/api/predict", tags=["Price Prediction"])
 async def predict(req: PredictPriceRequest):
+    if not _ensure_prediction():
+        raise HTTPException(status_code=503, detail="Prediction service unavailable.")
+    _predict_symbol = _loaded["prediction.predictor"].predict_symbol
+
     symbol = req.ticker.upper()
     days = req.days
     cached = _cache_get(symbol)
@@ -350,6 +421,11 @@ async def predict(req: PredictPriceRequest):
 
 @app.post("/api/predict/refresh/major", tags=["Price Prediction"])
 async def refresh_major_companies(days: int = 7) -> dict:
+    if not _ensure_prediction():
+        raise HTTPException(status_code=503, detail="Prediction service unavailable.")
+    _predict_symbol = _loaded["prediction.predictor"].predict_symbol
+    _MAJOR_COMPANIES = _loaded["prediction.config"].MAJOR_COMPANIES
+
     results = {}
     for sym in _MAJOR_COMPANIES:
         try:
@@ -380,6 +456,11 @@ _ws_manager = _ConnectionManager()
 
 @app.websocket("/ws/live/{symbol}")
 async def websocket_live(websocket: WebSocket, symbol: str):
+    if not _ensure_prediction():
+        await websocket.close(code=1013, reason="Prediction service unavailable")
+        return
+    _predict_symbol = _loaded["prediction.predictor"].predict_symbol
+
     await _ws_manager.connect(websocket, symbol.upper())
     try:
         while True:
@@ -394,17 +475,24 @@ async def websocket_live(websocket: WebSocket, symbol: str):
 
 @app.post(
     "/api/inference",
-    response_model=InferenceResponse,
     tags=["Shadow Portfolio"],
     summary="Run RL agent inference",
 )
-async def post_inference(request: InferenceRequest):
+async def post_inference(request: dict = Body(...)):
     """Run the Shadow Portfolio RL agent on the given ticker and date range."""
+    if not _ensure_shadow():
+        raise HTTPException(status_code=503, detail="Shadow portfolio service unavailable.")
+
+    InferenceRequest = _loaded["shadow.InferenceRequest"]
+    InferenceResponse = _loaded["shadow.InferenceResponse"]
+    run_inference = _loaded["shadow.run_inference"]
+
     try:
+        req = InferenceRequest(**request)
         result = run_inference(
-            ticker=request.ticker,
-            start_date=request.start_date,
-            end_date=request.end_date,
+            ticker=req.ticker,
+            start_date=req.start_date,
+            end_date=req.end_date,
         )
         return InferenceResponse(**result)
     except FileNotFoundError as e:
