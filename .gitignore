@@ -4,13 +4,14 @@ __pycache__/
 *$py.class
 
 # RL Agent Models & Stats
-saved_models/
-*.zip
-*.pkl
+# (Un-ignored for Render deployment)
+# saved_models/
+# *.zip
+# *.pkl
 
 # Local ML model artifacts
-ml_models/*.keras
-ml_models/scalers/*.pkl
+# ml_models/*.keras
+# ml_models/scalers/*.pkl
 
 # Environments
 .venv/
