@@ -71,25 +71,12 @@ app.add_middleware(
 
 
 def cache_prediction(symbol: str, payload: dict) -> None:
-    try:
-        key = f'prediction:{symbol}'
-        redis_client.set(key, json.dumps(payload), ex=REDIS_TTL)
-    except RedisError as exc:
-        logger.warning('Redis cache write failed: %s', exc)
-
+    # Redis disabled locally to prevent Error 10061 logs
+    pass
 
 def get_cached_prediction(symbol: str) -> dict | None:
-    try:
-        key = f'prediction:{symbol}'
-        raw = redis_client.get(key)
-        if not raw:
-            return None
-        payload = json.loads(raw)
-        payload['cached'] = True
-        return payload
-    except RedisError as exc:
-        logger.warning('Redis cache read failed: %s', exc)
-        return None
+    # Redis disabled locally
+    return None
 
 
 @app.get('/')
@@ -115,6 +102,7 @@ async def predict(symbol: str, days: int = 7):
     try:
         result = await asyncio.to_thread(predict_symbol, symbol, days)
         cache_prediction(symbol, result)
+        print(result)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
