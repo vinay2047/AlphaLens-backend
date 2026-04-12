@@ -112,21 +112,46 @@ def load_model() -> tuple[PPO, str]:
         )
 
     logger.info("Loading PPO model from %s", model_path)
-    import torch
-    original_torch_load = torch.load
 
-    def safe_torch_load(*args, **kwargs):
-        # Force mmap=False to avoid Render's memory-mapping restrictions
-        # which cause the PytorchStreamReader miniz read failures.
-        kwargs["mmap"] = False
-        kwargs["map_location"] = torch.device('cpu')
-        return original_torch_load(*args, **kwargs)
+    # ─── ROOT CAUSE & FIX ───────────────────────────────────────
+    # SB3's load_from_zip_file() opens the outer .zip with Python's
+    # zipfile module, then passes each inner .pth file to torch.load()
+    # as a ZipExtFile (a streaming decompressor — NOT a real file).
+    #
+    # PyTorch's C++ PyTorchFileReader wraps this in a Python-adapter
+    # that calls .read()/.seek() across the C++/Python boundary.
+    # On Render's containerized filesystem (overlay2 + cgroups),
+    # the C++ adapter's seek-within-deflated-stream path triggers a
+    # miniz "file read failed" error on .data/serialization_id.
+    #
+    # Fix: intercept torch.load() and, for any file-like input,
+    # read ALL bytes into a real temporary file on disk first.
+    # PyTorch's C++ reader then gets a proper Linux file descriptor
+    # it can mmap/seek/read natively — no Python adapter involved.
+    # ────────────────────────────────────────────────────────────
+    import torch
+    import tempfile
+    _original_torch_load = torch.load
+
+    def _materialized_torch_load(f, *args, **kwargs):
+        if hasattr(f, 'read') and not isinstance(f, (str, bytes, os.PathLike)):
+            data = f.read()
+            fd, tmp_path = tempfile.mkstemp(suffix='.pth')
+            try:
+                os.write(fd, data)
+                os.close(fd)
+                kwargs.setdefault("map_location", torch.device("cpu"))
+                return _original_torch_load(tmp_path, *args, **kwargs)
+            finally:
+                os.unlink(tmp_path)
+        return _original_torch_load(f, *args, **kwargs)
 
     try:
-        torch.load = safe_torch_load
+        torch.load = _materialized_torch_load
         _cached_model = PPO.load(model_path, device="cpu")
     finally:
-        torch.load = original_torch_load
+        torch.load = _original_torch_load
+
     _cached_vecnorm_path = vecnorm_path
     logger.info("Model loaded successfully.")
 
