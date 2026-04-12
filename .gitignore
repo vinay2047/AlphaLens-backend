@@ -8,6 +8,10 @@ saved_models/
 *.zip
 *.pkl
 
+# Local ML model artifacts
+ml_models/*.keras
+ml_models/scalers/*.pkl
+
 # Environments
 .venv/
 env/
