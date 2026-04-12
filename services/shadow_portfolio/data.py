@@ -18,39 +18,83 @@ This is stricter than a percentage-based split because:
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _create_session() -> requests.Session:
+    """Create a requests session with browser-like headers to avoid IP blocks."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    return session
 
 
 def fetch_data(ticker: str = "SPY", start: str = "2010-01-01",
-               end: str = "2022-12-31") -> pd.DataFrame:
+               end: str = "2022-12-31", max_retries: int = 3) -> pd.DataFrame:
     """
-    Download OHLCV data via yfinance.
+    Download OHLCV data via yfinance with retry logic.
 
-    Uses auto_adjust=True to get split/dividend-adjusted prices,
-    preventing artificial jumps from corrupting the return series.
-
-    Default range: 2010-01-01 to 2022-12-31, covering multiple market
-    regimes including the 2020 COVID crash and 2022 bear market.
+    Uses a custom requests session with browser-like headers to avoid
+    Yahoo Finance blocking cloud server IPs (e.g., Render, AWS, GCP).
 
     Args:
         ticker: Yahoo Finance symbol (default: SPY as market proxy).
         start:  Start date string (YYYY-MM-DD).
         end:    End date string (YYYY-MM-DD).
+        max_retries: Number of download attempts before giving up.
 
     Returns:
         DataFrame with columns ['Open', 'High', 'Low', 'Close', 'Volume'].
     """
-    print(f"  Downloading {ticker} from {start} to {end}...")
-    df = yf.download(ticker, start=start, end=end, auto_adjust=True,
-                     progress=False)
+    session = _create_session()
+    logger.info("Downloading %s from %s to %s...", ticker, start, end)
 
-    # Recent yfinance versions may return MultiIndex columns for single ticker
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = yf.download(
+                ticker, start=start, end=end,
+                auto_adjust=True, progress=False,
+                session=session,
+            )
 
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    df = df.dropna()
-    print(f"  Downloaded {len(df)} trading days.")
-    return df
+            # Recent yfinance versions may return MultiIndex columns for single ticker
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+            df = df.dropna()
+
+            if len(df) > 0:
+                logger.info("Downloaded %d trading days (attempt %d).", len(df), attempt)
+                return df
+
+            logger.warning(
+                "yfinance returned 0 rows for %s (attempt %d/%d)",
+                ticker, attempt, max_retries,
+            )
+        except Exception as e:
+            logger.warning(
+                "yfinance download error for %s (attempt %d/%d): %s",
+                ticker, attempt, max_retries, e,
+            )
+
+        if attempt < max_retries:
+            time.sleep(2 * attempt)  # back off: 2s, 4s
+
+    # Final fallback: return whatever we got (may be empty)
+    logger.error("All %d download attempts failed for %s.", max_retries, ticker)
+    return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
 
 
 def get_aligned_dates(df: pd.DataFrame, feature_length: int) -> pd.DatetimeIndex:
