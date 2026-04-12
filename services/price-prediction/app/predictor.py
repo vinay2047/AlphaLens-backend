@@ -48,6 +48,22 @@ def predict_symbol(symbol: str, days_ahead: int = 7, features: dict = None) -> d
     
     ML_API_BASE_URL = os.environ.get("ML_API_BASE_URL", "https://dead-or-alpha-future-company-price-predictor.hf.space")
     
+    # If frontend sends empty features, fallback to fetching them on the backend
+    if not features or not all(k in features for k in ('open', 'high', 'low', 'close', 'volume')) or len(features.get('close', [])) == 0:
+        logger.info(f"Missing feature arrays for {symbol} from frontend. Fetching via yfinance...")
+        try:
+            from app.data_fetcher import fetch_stock_data
+            df = fetch_stock_data(symbol, period='6mo')
+            features = {
+                'open': df['open'].tolist(),
+                'high': df['high'].tolist(),
+                'low': df['low'].tolist(),
+                'close': df['close'].tolist(),
+                'volume': df['volume'].tolist(),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch features via yfinance for {symbol}: {e}")
+
     # Attempt to use real ML model from HF Space if features are provided
     if features and all(k in features for k in ('open', 'high', 'low', 'close', 'volume')) and len(features['close']) > 0:
         current_price = features['close'][-1]
