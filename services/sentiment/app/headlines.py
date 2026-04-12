@@ -5,6 +5,7 @@ headlines.py – Headline provider for financial news using Finnhub.
 from __future__ import annotations
 
 import os
+import re
 import logging
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -22,32 +23,39 @@ if not _FINNHUB_API_KEY:
 # Initialize Finnhub client
 finnhub_client = finnhub.Client(api_key=_FINNHUB_API_KEY) if _FINNHUB_API_KEY else None
 
-def get_headlines(ticker: str, count: int = 5) -> list[dict]:
-    """Return up to *count* financial headlines for *ticker* using Finnhub.
+def _clean_company_name(profile_name: str) -> str:
+    """Removes common corporate suffixes to get the core brand name."""
+    if not profile_name:
+        return ""
+    # Strip common suffixes that mess up matching
+    suffixes = [r'\binc\.?', r'\bcorp\.?', r'\bltd\.?', r'\bllc\b', r'\bcompany\b', r'\bholdings\b']
+    clean_name = profile_name.lower()
+    for suffix in suffixes:
+        clean_name = re.sub(suffix, '', clean_name)
+    
+    # Remove special characters and extra whitespace
+    clean_name = re.sub(r'[^a-z0-9\s]', '', clean_name)
+    return clean_name.strip()
 
-    Each headline dict contains:
-        - ``headline``  : the generated text
-        - ``source``    : publisher
-        - ``timestamp`` : ISO-8601 UTC string
-    """
+def get_headlines(ticker: str, count: int = 5, days_back: int = 7) -> list[dict]:
+    """Return the most *relevant* financial headlines for *ticker* using scoring."""
     if not finnhub_client:
-        logger.error("Cannot fetch headlines. Finnhub client is not initialized (missing API key).")
+        logger.error("Finnhub client is not initialized.")
         return []
 
     ticker = ticker.upper()
     try:
-        # Extract a keyword from the company name to filter out macro noise
+        # 1. Smarter Company Name Extraction
         try:
             profile = finnhub_client.company_profile2(symbol=ticker)
-            short_name = profile.get("name", "") if profile else ""
-            # e.g. "Apple Inc." -> "apple"
-            company_kw = short_name.split()[0].lower() if short_name else ticker.lower()
+            raw_name = profile.get("name", "") if profile else ""
+            company_kw = _clean_company_name(raw_name)
         except Exception:
-            company_kw = ticker.lower()
+            company_kw = ""
 
-        # Finnhub company_news requires YYYY-MM-DD
+        # 2. Shorter, tighter window
         end_date = datetime.now(tz=timezone.utc)
-        start_date = end_date - timedelta(days=7)
+        start_date = end_date - timedelta(days=days_back)
         
         _to = end_date.strftime("%Y-%m-%d")
         _from = start_date.strftime("%Y-%m-%d")
@@ -56,38 +64,66 @@ def get_headlines(ticker: str, count: int = 5) -> list[dict]:
         
         if not news_items:
             return []
-            
-        results = []
-        for item in news_items:
-            headline = item.get("headline", "No Title")
-            summary = item.get("summary", "")
-            
-            # RELEVANCE FILTER:
-            # Skip article if neither the ticker nor the company name appears in it
-            search_text = (headline + " " + summary).lower()
-            if ticker.lower() not in search_text and company_kw not in search_text:
-                continue
 
-            pub_time = item.get("datetime")
-            if pub_time:
-                dt = datetime.fromtimestamp(pub_time, tz=timezone.utc)
-                timestamp = dt.isoformat()
-            else:
-                timestamp = datetime.now(tz=timezone.utc).isoformat()
+        # Regex patterns for exact word boundary matching
+        ticker_pattern = re.compile(rf'\b{re.escape(ticker)}\b', re.IGNORECASE)
+        company_pattern = re.compile(rf'\b{re.escape(company_kw)}\b', re.IGNORECASE) if company_kw else None
+
+        scored_articles = []
+        seen_headlines = set()
+
+        # 3. Score and Deduplicate
+        for item in news_items:
+            headline = item.get("headline", "No Title").strip()
+            summary = item.get("summary", "").strip()
+            
+            # Deduplication check
+            if headline.lower() in seen_headlines:
+                continue
+            seen_headlines.add(headline.lower())
+
+            score = 0
+            
+            # High Priority: Ticker or Name in the actual Headline
+            if ticker_pattern.search(headline):
+                score += 5
+            if company_pattern and company_pattern.search(headline):
+                score += 4
                 
+            # Medium Priority: Ticker or Name in Summary
+            if ticker_pattern.search(summary):
+                score += 2
+            if company_pattern and company_pattern.search(summary):
+                score += 1
+
+            # Only keep articles that score above a zero threshold
+            if score > 0:
+                pub_time = item.get("datetime")
+                dt = datetime.fromtimestamp(pub_time, tz=timezone.utc) if pub_time else datetime.now(tz=timezone.utc)
+                
+                scored_articles.append({
+                    "headline": headline,
+                    "source": item.get("source", "Unknown"),
+                    "timestamp": dt.isoformat(),
+                    "score": score,  # Storing score for sorting
+                    "datetime_obj": dt
+                })
+
+        # 4. Sort by Relevance (Score) first, then Recency (Timestamp)
+        scored_articles.sort(key=lambda x: (x["score"], x["datetime_obj"]), reverse=True)
+
+        # 5. Clean up the output to match original expected schema
+        results = []
+        for article in scored_articles[:count]:
             results.append({
-                "headline": headline,
-                "source": item.get("source", "Unknown Publisher"),
-                "timestamp": timestamp,
+                "headline": article["headline"],
+                "source": article["source"],
+                "timestamp": article["timestamp"]
             })
             
-            if len(results) >= count:
-                break
-                
         return results
-        
+
     except finnhub.FinnhubAPIException as e:
-        # This handles rate limits (HTTP 429) out of the box nicely
         logger.error(f"Finnhub API Error for {ticker}: {e}")
         return []
     except Exception as e:
