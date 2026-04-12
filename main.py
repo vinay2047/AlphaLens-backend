@@ -511,12 +511,17 @@ async def websocket_live(websocket: WebSocket, symbol: str):
 
 # ===== SHADOW PORTFOLIO ====================================================
 
+class ShadowInferenceRequest(BaseModel):
+    ticker: str = "SPY"
+    start_date: str = "2024-01-01"
+    end_date: str = "2024-06-30"
+
 @app.post(
     "/api/inference",
     tags=["Shadow Portfolio"],
     summary="Run RL agent inference",
 )
-async def post_inference(request: dict = Body(...)):
+async def post_inference(request: ShadowInferenceRequest):
     """Run the Shadow Portfolio RL agent on the given ticker and date range."""
     if not _ensure_shadow():
         raise HTTPException(status_code=503, detail="Shadow portfolio service unavailable.")
@@ -526,7 +531,7 @@ async def post_inference(request: dict = Body(...)):
     run_inference = _loaded["shadow.run_inference"]
 
     try:
-        req = InferenceRequest(**request)
+        req = InferenceRequest(**request.model_dump())
         result = run_inference(
             ticker=req.ticker,
             start_date=req.start_date,

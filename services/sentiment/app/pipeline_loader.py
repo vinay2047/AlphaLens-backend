@@ -18,7 +18,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _MODEL_ID = "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis"
-_API_URL = f"https://api-inference.huggingface.co/models/{_MODEL_ID}"
+_API_URL = f"https://router.huggingface.co/hf-inference/models/{_MODEL_ID}"
 _HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 _HEADERS = {"Content-Type": "application/json"}
