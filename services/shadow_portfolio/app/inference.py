@@ -112,7 +112,21 @@ def load_model() -> tuple[PPO, str]:
         )
 
     logger.info("Loading PPO model from %s", model_path)
-    _cached_model = PPO.load(model_path)
+    import torch
+    original_torch_load = torch.load
+
+    def safe_torch_load(*args, **kwargs):
+        # Force mmap=False to avoid Render's memory-mapping restrictions
+        # which cause the PytorchStreamReader miniz read failures.
+        kwargs["mmap"] = False
+        kwargs["map_location"] = torch.device('cpu')
+        return original_torch_load(*args, **kwargs)
+
+    try:
+        torch.load = safe_torch_load
+        _cached_model = PPO.load(model_path, device="cpu")
+    finally:
+        torch.load = original_torch_load
     _cached_vecnorm_path = vecnorm_path
     logger.info("Model loaded successfully.")
 
