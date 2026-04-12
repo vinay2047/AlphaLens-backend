@@ -1,22 +1,32 @@
 import logging
+import random
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-import pandas as pd
-import random
+import yfinance as yf
+
 from app.data_fetcher import FEATURE_COLS, fetch_stock_data, prepare_sequence
 from app.scaler_utils import inverse_transform_price, load_scaler
 
+# --- Setup Logging ---
+logger = logging.getLogger(__name__)
+
+# --- TensorFlow Initialization ---
 TRY_TENSORFLOW = True
 try:
     import tensorflow as tf
-except ImportError:
+    logger.error("--- IMPORT SUCCESSFULLY ---")
+except ImportError as e:
     TRY_TENSORFLOW = False
-    print("Warning: TensorFlow is not installed. Predictor running in AI Simulation Mock Mode.")
+    logger.error("--- IMPORT ERROR DETAILS ---")
+    logger.error(f"Reason: {e}")
+    logger.error(traceback.format_exc())
+    logger.error("----------------------------")
+    logger.warning("TensorFlow failed to load. Predictor running in AI Simulation Mock Mode.")
 
-logger = logging.getLogger(__name__)
-
+# --- Globals ---
 MODELS_DIR = Path(__file__).resolve().parents[3] / 'ml_models'
 _models = {}
 
@@ -67,26 +77,32 @@ def predict_symbol(symbol: str, days_ahead: int = 7) -> dict:
     bilstm_key = f'bilstm_{symbol}'
     tcn_key = f'tcn_gru_{symbol}'
 
-    # Short-circuit robust Mock Mode execution to avoid Pandas 3.0 / yfinance crashes
+    # --- MOCK MODE EXECUTION ---
+    # Short-circuit robust Mock Mode execution to avoid Pandas / yfinance crashes
     if not TRY_TENSORFLOW:
-        import random
-        # Just use a dummy starting price, the Next.js frontend fetches the exact live price anyway.
-        import yfinance as yf
         try:
             # Query recent days to guarantee a valid closing price even over weekends/holidays
             ticker_data = yf.Ticker(symbol).history(period="5d")
-            # Yfinance returns columns capitalized (e.g. 'Close')
             current_price = float(ticker_data['Close'].iloc[-1])
         except Exception as exc:
-            print(f"Warning: Failed to fetch live price for {symbol}: {exc}")
-        current_price = 150.0 
+            logger.warning(f"yfinance package failed for {symbol}: {exc}. Attempting direct HTTP fallback.")
+            import httpx
+            # Secondary Oracle: fetch real data via direct chart API if yfinance library fails
+            res = httpx.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", timeout=10.0)
+            if res.status_code == 200:
+                current_price = float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
+            else:
+                raise ValueError(f"Both Market Oracles entirely failed to fetch a valid price for {symbol}.")
         
         forecast = []
         last_price = current_price
+        
         for day_index in range(1, days_ahead + 1):
             drift = random.uniform(-0.015, 0.02)
             day_price = last_price * (1 + drift)
             forecast_date = datetime.utcnow() + timedelta(days=day_index)
+            
+            # Skip weekends
             while forecast_date.weekday() >= 5:
                 forecast_date += timedelta(days=1)
                 
@@ -118,6 +134,7 @@ def predict_symbol(symbol: str, days_ahead: int = 7) -> dict:
     # --- TRUE AI EXECUTION PIPELINE ---
     has_bilstm = bilstm_key in _models
     has_tcn = tcn_key in _models
+    
     if not has_bilstm and not has_tcn:
         raise ValueError(f'No models found for {symbol}. Available: {get_available_symbols()}')
 
@@ -189,6 +206,7 @@ def _build_multi_day_forecast(df, scaler, symbol, has_bilstm, has_tcn, days=7):
 
             day_price = sum(preds) / len(preds)
             forecast_date = datetime.utcnow() + timedelta(days=day_index)
+            
             while forecast_date.weekday() >= 5:
                 forecast_date += timedelta(days=1)
 
