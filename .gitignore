@@ -18,5 +18,4 @@ __pycache__/
 env/
 venv/
 
-# Results
-evaluation_results.png
+

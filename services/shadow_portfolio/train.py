@@ -100,7 +100,7 @@ def train():
         n_steps=2048,         # Rollout buffer size
         batch_size=64,        # Mini-batch size for SGD updates
         n_epochs=10,          # PPO epochs per rollout
-        gamma=0.999,          # Longer horizon (~1000 days), reduces churn
+        gamma=0.995,          # ~200-day horizon, responsive to regime shifts
         ent_coef=0.02,        # Higher entropy bonus to prevent overfitting
         verbose=1,
         seed=42,

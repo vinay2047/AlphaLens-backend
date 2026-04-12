@@ -9,7 +9,7 @@ Architecture
 ------------
     Observation (17-dim):  Quant features + current position
     Action (1-dim [0,1]):  Asset allocation fraction
-    Reward:                Blended DSR + scaled return (balanced risk/return)
+    Reward:                DSR + scaled return + drawdown/concentration penalties
 
 Look-Ahead Bias Prevention
 --------------------------
@@ -59,7 +59,14 @@ class ShadowPortfolioEnv(gym.Env):
     return_weight : float
         Scaling factor for the portfolio-return component of the blended reward.
         Daily returns (~0.001) are multiplied by this to be comparable in
-        magnitude to DSR values (~0.1–0.5). Default 100.
+        magnitude to DSR values (~0.01–0.1). Default 10.
+    drawdown_weight : float
+        Penalty weight applied to the current drawdown (distance from peak).
+        Directly penalizes the agent for staying invested during declines.
+        Default 2.0.
+    concentration_weight : float
+        Penalty weight for extreme allocations (near 0% or 100%).
+        Uses (2w-1)² to encourage fractional positions. Default 0.5.
     """
 
     metadata = {"render_modes": []}
@@ -73,7 +80,9 @@ class ShadowPortfolioEnv(gym.Env):
         risk_free_annual: float = 0.05,   # 5% annual risk-free rate
         dsr_eta: float = 0.05,            # DSR EMA decay (faster adaptation)
         rebalance_threshold: float = 0.005,  # 0.5% threshold (smoother alloc)
-        return_weight: float = 100.0,     # Scale factor for return component
+        return_weight: float = 10.0,      # Scale factor for return component
+        drawdown_weight: float = 2.0,     # Penalty for portfolio drawdown
+        concentration_weight: float = 0.5, # Penalty for extreme allocations
     ):
         super().__init__()
 
@@ -89,6 +98,8 @@ class ShadowPortfolioEnv(gym.Env):
         self.dsr_eta = dsr_eta
         self.rebalance_threshold = rebalance_threshold
         self.return_weight = return_weight
+        self.drawdown_weight = drawdown_weight
+        self.concentration_weight = concentration_weight
 
        
         self.daily_rf = risk_free_annual / 252.0
@@ -109,6 +120,7 @@ class ShadowPortfolioEnv(gym.Env):
         self._max_steps = len(self.returns) - 1  # Need returns[t+1]
         self._allocation = 0.0
         self._portfolio_value = 1.0
+        self._peak_value = 1.0
 
         # Differential Sharpe Ratio running averages (Moody & Saffell, 1998)
         self._A = 0.0  # EMA of portfolio returns
@@ -136,6 +148,7 @@ class ShadowPortfolioEnv(gym.Env):
         self._step_idx = 0
         self._allocation = 0.0
         self._portfolio_value = 1.0
+        self._peak_value = 1.0
 
         # Reset DSR running averages
         self._A = 0.0
@@ -233,21 +246,31 @@ class ShadowPortfolioEnv(gym.Env):
 
         dsr_reward = (B_prev * delta_A - 0.5 * A_prev * delta_B) / denom
 
-        # ---- Blended reward: DSR + scaled portfolio return ----
+        # ---- Blended reward: DSR + scaled return + penalties ----
         #
-        # Pure DSR biases heavily toward cash (zero variance = zero risk
-        # penalty), causing the agent to under-invest. By adding a scaled
-        # log-return component, the agent gets a direct signal for capturing
-        # market gains. The DSR component still penalizes uncompensated risk,
-        # creating a balanced risk/return tradeoff.
-        #
-        # return_weight scales daily returns (~0.001) to be comparable
-        # in magnitude to DSR values (~0.1–0.5). VecNormalize further
-        # stabilizes the combined signal.
+        # return_weight=10 scales daily returns (~0.001) to be comparable
+        # in magnitude to DSR values (~0.01–0.1). Reduced from 100 to let
+        # the DSR risk-adjustment signal meaningfully influence behavior.
         return_component = self.return_weight * portfolio_return
-        reward = dsr_reward + return_component
 
-        # Fix #2: Clip reward to [-10, 10] to prevent extreme gradient
+        # ---- Drawdown penalty ----
+        # Penalize the agent when portfolio value drops below its peak.
+        # This gives a direct, immediate signal to reduce exposure during
+        # sustained declines rather than riding them out.
+        self._peak_value = max(self._peak_value, self._portfolio_value)
+        current_drawdown = (self._peak_value - self._portfolio_value) / self._peak_value
+        drawdown_penalty = -self.drawdown_weight * current_drawdown
+
+        # ---- Concentration penalty ----
+        # Penalize extreme allocations (near 0% or 100%) to encourage
+        # fractional positions. Uses quadratic: (2w-1)² = 1 at extremes,
+        # 0 at 50%. This prevents bang-bang control and promotes smoother
+        # allocation curves that better reflect uncertainty.
+        concentration_penalty = -self.concentration_weight * (2.0 * self._allocation - 1.0) ** 2
+
+        reward = dsr_reward + return_component + drawdown_penalty + concentration_penalty
+
+        # Clip reward to [-10, 10] to prevent extreme gradient
         # updates that can destabilize PPO's trust region optimization.
         reward = float(np.clip(reward, -10.0, 10.0))
 
